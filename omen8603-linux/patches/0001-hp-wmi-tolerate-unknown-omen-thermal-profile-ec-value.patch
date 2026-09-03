@@ -1,0 +1,44 @@
+--- a/drivers/platform/x86/hp/hp-wmi.c
++++ b/drivers/platform/x86/hp/hp-wmi.c
+@@ -1522,7 +1522,28 @@
+ 		*profile = PLATFORM_PROFILE_COOL;
+ 		break;
+ 	default:
+-		return -EINVAL;
++		/*
++		 * Not every board on the OMEN allowlist keeps its thermal
++		 * profile at EC offset 0x95. On board 8603 (OMEN 17-cb0xxx,
++		 * "Santorini") that offset holds unrelated data, so the read
++		 * returns a value that matches neither the v0 nor the v1 enum.
++		 *
++		 * Returning -EINVAL here aborted thermal_profile_setup() and
++		 * left platform_profile unregistered even though the WMI *set*
++		 * command works fine on these boards - and because the return
++		 * value of thermal_profile_setup() is discarded, it failed
++		 * silently, with nothing logged.
++		 *
++		 * Default to balanced instead. This mirrors what
++		 * thermal_profile_setup() already does for Victus S boards
++		 * with an unknown EC layout, and is safe because
++		 * platform_profile_omen_get() serves reads from the cached
++		 * active_platform_profile rather than from the EC.
++		 */
++		pr_warn_once("Unknown EC thermal profile value 0x%02x, assuming balanced\n",
++			     tp);
++		*profile = PLATFORM_PROFILE_BALANCED;
++		break;
+ 	}
+ 
+ 	return 0;
+@@ -2300,7 +2321,10 @@
+ 	if (err < 0)
+ 		return err;
+ 
+-	thermal_profile_setup(device);
++	err = thermal_profile_setup(device);
++	if (err < 0)
++		dev_warn(&device->dev,
++			 "Failed to set up platform profile support (%d)\n", err);
+ 
+ 	return 0;
+ }

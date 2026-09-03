@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# ec-calibrate — read-only ACPI EC snapshot helper for OMEN 17-cb0xxx (board 8603).
+#
+# Purpose: determine which EC registers OMEN's four power modes actually change,
+# without guessing. The EC keeps its state across a warm reboot, so:
+#
+#   1. boot Windows, pick a mode in OMEN Gaming Hub, reboot into Linux
+#   2. run:  sudo ./ec-calibrate performance
+#   3. repeat for balanced / quiet / eco
+#   4. run:  sudo ./ec-calibrate --diff
+#
+# Step 4 prints every offset that differs between modes. Offset 0x95 is the
+# thermal-profile byte hp-wmi uses; anything else that moves is fan-curve state.
+#
+# This script only ever reads the EC.
+
+set -uo pipefail
+
+EC=/sys/kernel/debug/ec/ec0/io
+SNAPDIR=/var/tmp/omen-ec
+PROFILE_OFFSET=$((0x95))
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || die "must run as root"
+
+ensure_ec() {
+    [[ -r $EC ]] && return 0
+    mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+    modprobe ec_sys 2>/dev/null
+    [[ -r $EC ]] && return 0
+    die "cannot read $EC
+Your kernel needs CONFIG_ACPI_EC_DEBUGFS (module 'ec_sys') and debugfs mounted.
+Check with:  zgrep ACPI_EC_DEBUGFS /proc/config.gz  ||  grep ACPI_EC_DEBUGFS /boot/config-\$(uname -r)"
+}
+
+snapshot() {
+    local label=$1
+    mkdir -p "$SNAPDIR"
+    local out="$SNAPDIR/$label.bin"
+    dd if="$EC" of="$out" bs=256 count=1 status=none || die "EC read failed"
+    printf 'saved %s (%s bytes)\n\n' "$out" "$(stat -c%s "$out")"
+
+    echo "full EC dump:"
+    hexdump -C "$out"
+
+    local v
+    v=$(od -An -tu1 -j "$PROFILE_OFFSET" -N1 "$out" | tr -d ' \n')
+    printf '\nEC[0x95] (thermal profile) = 0x%02X (%d)\n' "$v" "$v"
+}
+
+diff_all() {
+    local files=("$SNAPDIR"/*.bin)
+    [[ -e ${files[0]} ]] || die "no snapshots in $SNAPDIR yet"
+    if (( ${#files[@]} < 2 )); then
+        die "need at least 2 snapshots to diff; have ${#files[@]}"
+    fi
+
+    echo "snapshots:"
+    local labels=()
+    for f in "${files[@]}"; do
+        labels+=("$(basename "$f" .bin)")
+        printf '  %s\n' "$(basename "$f" .bin)"
+    done
+    echo
+    printf 'offset  %s\n' "$(printf '%-14s' "${labels[@]}")"
+    printf -- '------  %s\n' "$(printf '%-14s' "${labels[@]//?/-}")"
+
+    local off
+    for (( off=0; off<256; off++ )); do
+        local vals=() first="" differs=0
+        for f in "${files[@]}"; do
+            local v
+            v=$(od -An -tu1 -j "$off" -N1 "$f" | tr -d ' \n')
+            vals+=("$(printf '0x%02X' "$v")")
+            [[ -z $first ]] && first=$v
+            [[ $v != "$first" ]] && differs=1
+        done
+        if (( differs )); then
+            local mark=""
+            (( off == PROFILE_OFFSET )) && mark="   <-- thermal profile (hp-wmi 0x95)"
+            printf '0x%02X    %s%s\n' "$off" "$(printf '%-14s' "${vals[@]}")" "$mark"
+        fi
+    done
+}
+
+ensure_ec
+
+case ${1-} in
+    --diff|-d) diff_all ;;
+    ''|--help|-h)
+        cat <<'EOF'
+usage:
+  sudo ./ec-calibrate <label>     take a snapshot (e.g. performance, balanced, quiet, eco)
+  sudo ./ec-calibrate --diff      show every EC offset that differs across snapshots
+EOF
+        ;;
+    *) snapshot "$1" ;;
+esac

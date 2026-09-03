@@ -1,0 +1,13 @@
+# private copies of evidence that contain unit identifiers (EC RAM dumps) or HP's own files
+.private/
+# kernel module build outputs (omen8603-linux/lab, src)
+*.o
+*.ko
+*.ko.zst
+*.mod
+*.mod.c
+*.cmd
+*.symvers
+modules.order
+.module-common.o
+__pycache__/

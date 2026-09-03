@@ -1,0 +1,188 @@
+--- a/drivers/platform/x86/hp/hp-wmi.c
++++ b/drivers/platform/x86/hp/hp-wmi.c
+@@ -56,6 +56,16 @@
+ 	HP_OMEN_EC_THERMAL_PROFILE_OFFSET		= 0x95,
+ };
+ 
++/*
++ * Board 8603 (OMEN 17-cb0xxx, "Santorini") keeps its thermal mode in EC byte
++ * 0x29, bits 1:0 (ACPI field OCCM), next to the max-fan flag (MAXF, bit 6) and
++ * a host-alive watchdog (OCCN, bit 7). On that board EC[0x95], where
++ * HP_OMEN_EC_THERMAL_PROFILE_OFFSET points, is a character of an ASCII serial
++ * string.
++ */
++#define HP_OMEN_EC_OCC_OFFSET		0x29
++#define HP_OMEN_EC_OCCM_MASK		0x03
++
+ #define HP_FAN_SPEED_AUTOMATIC	 0x00
+ #define HP_POWER_LIMIT_DEFAULT	 0x00
+ #define HP_POWER_LIMIT_NO_CHANGE 0xFF
+@@ -164,6 +174,23 @@
+ 	"8E41",
+ };
+ 
++/*
++ * DMI board names of OMEN laptops whose embedded controller uses the OCCM/OCCN
++ * layout in EC[0x29] and expects a periodic host-alive heartbeat.
++ *
++ * The heartbeat is WMI command 0x20008 / type 0x10, which the firmware's GM10
++ * method answers by setting EC field OCCN. Measured on board 8603: OCCN
++ * expires 60-75 s after it is set, and if it stays clear for about six minutes
++ * the EC clamps the CPU package to 45 W over PECI in every thermal mode,
++ * performance included. No register visible to the OS reflects or overrides
++ * that clamp, and only a reboot releases it. OMEN Gaming Hub on Windows sends
++ * 0x10 every 90 s and polls the IR/skin sensor (0x23) every 30 s, and with that
++ * traffic alive performance mode sustains ~77 W instead of 45 W.
++ */
++static const char * const omen_occ_boards[] = {
++	"8603",
++};
++
+ /* DMI Board names of Omen laptops that are specifically set to be thermal
+  * profile version 0 by the Omen Command Center app, regardless of what
+  * the get system design information WMI call returns
+@@ -352,6 +379,7 @@
+ 	HPWMI_FAN_SPEED_MAX_SET_QUERY		= 0x27,
+ 	HPWMI_GET_SYSTEM_DESIGN_DATA		= 0x28,
+ 	HPWMI_FAN_COUNT_GET_QUERY		= 0x10,
++	HPWMI_IR_SENSOR_GET_QUERY		= 0x23,
+ 	HPWMI_GET_GPU_THERMAL_MODES_QUERY	= 0x21,
+ 	HPWMI_SET_GPU_THERMAL_MODES_QUERY	= 0x22,
+ 	HPWMI_SET_POWER_LIMITS_QUERY		= 0x29,
+@@ -491,6 +519,19 @@
+ static bool platform_profile_support;
+ static bool zero_insize_support;
+ 
++/*
++ * EC host-alive heartbeat for boards in omen_occ_boards[]. 30 s keeps OCCN
++ * set continuously (it expires after 60-75 s); OMEN itself uses 90 s and
++ * tolerates the gaps because the clamp only engages after ~6 minutes.
++ */
++static unsigned int omen_host_alive_secs = 30;
++module_param(omen_host_alive_secs, uint, 0444);
++MODULE_PARM_DESC(omen_host_alive_secs,
++		 "EC host-alive heartbeat interval in seconds on OMEN boards that need one (0 = off, default 30)");
++
++static struct delayed_work omen_host_alive_dwork;
++static bool omen_host_alive_active;
++
+ static struct rfkill *wifi_rfkill;
+ static struct rfkill *bluetooth_rfkill;
+ static struct rfkill *wwan_rfkill;
+@@ -810,6 +851,68 @@
+ 			    board_name) >= 0;
+ }
+ 
++static bool is_omen_occ_board(void)
++{
++	const char *board_name = dmi_get_system_info(DMI_BOARD_NAME);
++
++	if (!board_name)
++		return false;
++
++	return match_string(omen_occ_boards, ARRAY_SIZE(omen_occ_boards),
++			    board_name) >= 0;
++}
++
++static void omen_host_alive_handler(struct work_struct *work)
++{
++	u8 data[4] = {};
++	int ret;
++
++	/* GM10: sets EC field OCCN (host alive). Reply byte 0 is always 0x02. */
++	ret = hp_wmi_perform_query(HPWMI_FAN_COUNT_GET_QUERY, HPWMI_GM,
++				   &data, sizeof(data), sizeof(data));
++	if (ret)
++		pr_warn_ratelimited("host-alive heartbeat (0x10) failed: %d\n", ret);
++
++	/* GM23: reads the IR/skin sensor. OMEN polls it every 30 s; mirror it. */
++	memset(data, 0, sizeof(data));
++	ret = hp_wmi_perform_query(HPWMI_IR_SENSOR_GET_QUERY, HPWMI_GM,
++				   &data, sizeof(data), sizeof(data));
++	if (ret)
++		pr_warn_ratelimited("IR sensor poll (0x23) failed: %d\n", ret);
++
++	if (READ_ONCE(omen_host_alive_active))
++		schedule_delayed_work(&omen_host_alive_dwork,
++				      secs_to_jiffies(omen_host_alive_secs));
++}
++
++static void omen_host_alive_start(void)
++{
++	if (!is_omen_occ_board() || !omen_host_alive_secs)
++		return;
++
++	INIT_DELAYED_WORK(&omen_host_alive_dwork, omen_host_alive_handler);
++	WRITE_ONCE(omen_host_alive_active, true);
++	schedule_delayed_work(&omen_host_alive_dwork, 0);
++	pr_info("EC host-alive heartbeat (WMI 0x10/0x23) every %u s\n",
++		omen_host_alive_secs);
++}
++
++static void omen_host_alive_stop(void)
++{
++	if (!READ_ONCE(omen_host_alive_active))
++		return;
++
++	WRITE_ONCE(omen_host_alive_active, false);
++	cancel_delayed_work_sync(&omen_host_alive_dwork);
++}
++
++/* Fire a heartbeat right away, e.g. after resume, without resetting the period. */
++static void omen_host_alive_kick(void)
++{
++	if (READ_ONCE(omen_host_alive_active))
++		mod_delayed_work(system_wq, &omen_host_alive_dwork, 0);
++}
++
+ static int omen_get_thermal_policy_version(void)
+ {
+ 	unsigned char buffer[8] = { 0 };
+@@ -837,9 +940,18 @@
+ static int omen_thermal_profile_get(void)
+ {
+ 	u8 data;
++	int ret;
+ 
+-	int ret = ec_read(HP_OMEN_EC_THERMAL_PROFILE_OFFSET, &data);
++	if (is_omen_occ_board()) {
++		ret = ec_read(HP_OMEN_EC_OCC_OFFSET, &data);
++		if (ret)
++			return ret;
++
++		/* OCCM uses the v0 encoding: 0 default, 1 performance, 2 cool */
++		return data & HP_OMEN_EC_OCCM_MASK;
++	}
+ 
++	ret = ec_read(HP_OMEN_EC_THERMAL_PROFILE_OFFSET, &data);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -2371,6 +2483,8 @@
+ 		dev_warn(&device->dev,
+ 			 "Failed to set up platform profile support (%d)\n", err);
+ 
++	omen_host_alive_start();
++
+ 	return 0;
+ }
+ 
+@@ -2400,6 +2514,8 @@
+ 	priv = platform_get_drvdata(device);
+ 	if (priv)
+ 		cancel_delayed_work_sync(&priv->keep_alive_dwork);
++
++	omen_host_alive_stop();
+ }
+ 
+ static int hp_wmi_resume_handler(struct device *device)
+@@ -2436,6 +2552,9 @@
+ 				  hp_wmi_get_sw_state(HPWMI_WWAN),
+ 				  hp_wmi_get_hw_state(HPWMI_WWAN));
+ 
++	/* The EC may have dropped OCCN while we slept; re-arm it at once. */
++	omen_host_alive_kick();
++
+ 	return 0;
+ }
+ 

@@ -1,0 +1,28 @@
+# SUPERSEDED 2026-09-03 by the kernel heartbeat (omen8603-linux/patches/0003) and omen-power.service. Do not enable.
+[Unit]
+Description=OMEN Santorini performance profile (RAPL PL1 ramp + EC thermal profile)
+Documentation=file:///usr/local/share/doc/omen-perf/FINDINGS.md
+After=multi-user.target
+# Only meaningful on AC — on battery the EC will fight you and it drains fast.
+ConditionACPower=true
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/omen-perf run
+Restart=on-failure
+RestartSec=5
+
+# Set your ec-calibrate-measured value here.
+Environment=EC_PERF=0x01
+Environment=PL1_CEIL_W=90
+Environment=PL2_W=90
+Environment=TEMP_TARGET=93
+Environment=TEMP_MAX=95
+
+# The daemon must touch debugfs and powercap, so it stays privileged.
+# Keep it minimal otherwise.
+NoNewPrivileges=false
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

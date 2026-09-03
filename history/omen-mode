@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# SUPERSEDED 2026-09-03: the heartbeat now lives in the kernel module (omen8603-linux/patches/0003)
+# and the RAPL follower is omen8603-linux/tools/omen-power. Do not run this alongside them.
+# omen-mode — set and HOLD the OMEN thermal/power mode on the HP OMEN 17-cb0xxx
+# (board 8603, i7-9750H, RTX 2080) under Linux.
+#
+# Measured on this machine from Windows (see FINDINGS.md, 2026-09-03):
+#   Performance sustains ~77 W all-core; Balanced/Cool clamp to 45 W after ~25 s.
+#   The mode lives in EC RAM byte 0x29, bits 1:0 (ACPI field OCCM):
+#       0 = balanced (OMEN "Default"/"Eco"), 1 = performance, 2 = cool ("Comfort")
+#   Bit 7 of the same byte (OCCN) is a HOST-ALIVE watchdog. OMEN Gaming Hub sets it
+#   with WMI command 0x20008 / type 0x10 every 90 s. If it is not refreshed the EC
+#   clears it after a few minutes and re-applies the 45 W clamp EVEN IN PERFORMANCE
+#   MODE (that is the "45 W ceiling" the earlier Linux investigation hit).
+#   Bit 6 (MAXF) is the max-fan flag.
+#
+# VERIFIED after a reboot (2026-09-03, logs in evidence/windows-2026-09-03/logs/boottest-after-reboot.log):
+#   with OMEN Gaming Hub killed and only this keepalive running (0x10 every 60 s, 0x23 every 30 s) plus
+#   MSR PL1=90 W, the CPU held 76-77 W for a 200 s all-core load 12 minutes after OMEN died. Without the
+#   keepalive the identical setup latched to 45 W after ~6 min, and nothing but a reboot clears the latch.
+#
+# So THREE things are needed on Linux, all started early at boot, before the latch can engage:
+#   (1) set OCCM=1 (performance), (2) keep OCCN refreshed (WMI 0x10 <= every 60 s; 0x23 every 30 s to
+#   mirror OMEN), (3) raise MSR PL1/PL2 to 90 W yourself via powercap, because OMEN normally ramps it
+#   and nothing on Linux does. The direct-EC fallback (bit 7 write) is UNVERIFIED as a keepalive; prefer WMI.
+#
+# Preferred path is the firmware's own WMI method (\_SB.WMID.WMAA), exactly what
+# OMEN Gaming Hub and the kernel hp-wmi driver use. It needs the `acpi_call`
+# module (AUR: acpi_call-dkms) — or a patched hp-wmi (see hp-wmi-8603.md).
+# Fallback is a direct EC RAM write via ec_sys (write_support=1).
+#
+#   sudo ./omen-mode performance      # set once (also refreshes OCCN once)
+#   sudo ./omen-mode balanced|cool
+#   sudo ./omen-mode status
+#   sudo ./omen-mode daemon           # set performance, refresh OCCN every 60 s
+#
+# env: METHOD=auto|wmi|ec   REFRESH_SECS=60   MODE (for daemon, default performance)
+
+set -uo pipefail
+
+METHOD=${METHOD:-auto}
+REFRESH_SECS=${REFRESH_SECS:-60}
+PL_WATTS=${PL_WATTS:-90}          # MSR PL1/PL2 to program via powercap (0 = leave alone)
+EC=/sys/kernel/debug/ec/ec0/io
+ACPI_CALL=/proc/acpi/call
+PP=/sys/firmware/acpi/platform_profile
+EC_MODE_OFF=0x29
+
+log(){ printf '[omen-mode] %s\n' "$*"; }
+die(){ printf '[omen-mode] error: %s\n' "$*" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || die "run as root"
+
+# ---------- WMI via acpi_call ----------
+# WMAA(Arg0=instance, Arg1=method-id, Arg2=input buffer). Method id 3 selects the
+# 128-byte output variant (hpqBIOSInt128). Input buffer layout (little endian):
+#   "SECU" | Command=0x20008 | CommandType | Size | data...
+wmi_available(){
+    [[ -w $ACPI_CALL ]] && return 0
+    modprobe acpi_call 2>/dev/null && [[ -w $ACPI_CALL ]]
+}
+wmi_call(){ # $1 = command type (hex), $2.. = data bytes (hex)
+    local type=$1; shift
+    local n=$# buf="5345435508000200" b
+    buf+=$(printf '%02x000000' "$type")
+    buf+=$(printf '%02x000000' "$n")
+    for b in "$@"; do buf+=$(printf '%02x' "$b"); done
+    printf '\\_SB.WMID.WMAA 0 3 b%s' "$buf" > "$ACPI_CALL"
+    local r; r=$(cat "$ACPI_CALL")
+    # result is a buffer; bytes 4..7 are the return code
+    local rc=${r:0:64}
+    log "WMI type=$(printf '0x%02x' "$type") data=[$*] -> ${r:0:48}"
+}
+wmi_set_mode(){ wmi_call 0x1A 0xFF "$1" 0x00 0x00; }
+wmi_keepalive(){ wmi_call 0x10 0 0 0 0; wmi_call 0x23 0 0 0 0; }
+
+# ---------- direct EC ----------
+ec_available(){
+    mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+    [[ -w $EC ]] && return 0
+    modprobe -r ec_sys 2>/dev/null; modprobe ec_sys write_support=1 2>/dev/null
+    [[ -w $EC ]]
+}
+ec_rd(){ od -An -tu1 -j "$(( $1 ))" -N1 "$EC" | tr -d ' \n'; }
+ec_wr(){ printf "$(printf '\\x%02X' "$(( $2 ))")" | dd of="$EC" bs=1 seek="$(( $1 ))" count=1 conv=notrunc status=none; }
+ec_set_mode(){ local v; v=$(ec_rd $EC_MODE_OFF); ec_wr $EC_MODE_OFF $(( (v & ~0x03) | ($1 & 3) )); }
+ec_keepalive(){ local v; v=$(ec_rd $EC_MODE_OFF); ec_wr $EC_MODE_OFF $(( v | 0x80 )); }
+
+# ---------- dispatch ----------
+pick_method(){
+    case $METHOD in
+        wmi)  wmi_available || die "acpi_call not available (install acpi_call-dkms)";;
+        ec)   ec_available  || die "no writable $EC (CONFIG_ACPI_EC_DEBUGFS, ec_sys write_support=1)";;
+        auto) if wmi_available; then METHOD=wmi; elif ec_available; then METHOD=ec; else die "neither acpi_call nor ec_sys available"; fi;;
+        *) die "METHOD must be auto|wmi|ec";;
+    esac
+    log "method: $METHOD"
+}
+set_mode(){   if [[ $METHOD == wmi ]]; then wmi_set_mode "$1"; else ec_set_mode "$1"; fi; }
+set_rapl(){ (( PL_WATTS > 0 )) || return 0; local z; for z in /sys/class/powercap/intel-rapl*:0; do
+    [[ -f $z/name && $(<"$z/name") == package-0 ]] || continue
+    echo $(( PL_WATTS * 1000000 )) > "$z/constraint_0_power_limit_uw" 2>/dev/null && echo $(( PL_WATTS * 1000000 )) > "$z/constraint_1_power_limit_uw" 2>/dev/null && log "RAPL $(basename "$z"): PL1=PL2=${PL_WATTS} W"
+  done; }
+keepalive(){  if [[ $METHOD == wmi ]]; then wmi_keepalive;     else ec_keepalive;     fi; }
+
+mode_num(){ case $1 in performance|perf|1) echo 1;; balanced|default|eco|0) echo 0;; cool|comfort|quiet|2) echo 2;; *) die "unknown mode '$1'";; esac; }
+mode_name(){ case $1 in 0) echo balanced;; 1) echo performance;; 2) echo cool;; *) echo "?($1)";; esac; }
+
+status(){
+    ec_available || die "need ec_sys to read status"
+    local v; v=$(ec_rd $EC_MODE_OFF)
+    printf '[omen-mode] EC[0x29]=0x%02X  mode=%s  maxfan=%d  host-alive(OCCN)=%d\n' \
+        "$v" "$(mode_name $(( v & 3 )))" $(( (v >> 6) & 1 )) $(( (v >> 7) & 1 ))
+    [[ -r $PP ]] && log "platform_profile: $(<"$PP")  (choices: $(<"${PP}_choices"))"
+    local z; for z in /sys/class/powercap/intel-rapl:0; do
+        [[ -f $z/constraint_0_power_limit_uw ]] && log "RAPL PL1=$(( $(<"$z/constraint_0_power_limit_uw")/1000000 )) W PL2=$(( $(<"$z/constraint_1_power_limit_uw")/1000000 )) W (binding while the EC is unlatched; OMEN normally ramps this to 90 W)"
+    done
+}
+
+case ${1-status} in
+    status) status ;;
+    performance|balanced|cool|default|eco|comfort|quiet|perf)
+        pick_method; m=$(mode_num "$1"); set_mode "$m"; keepalive; (( m == 1 )) && set_rapl; sleep 0.5; status ;;
+    daemon)
+        pick_method; m=$(mode_num "${MODE:-performance}")
+        trap 'log "exiting: leaving mode as-is; OCCN will expire on its own"; exit 0' INT TERM
+        set_mode "$m"; (( m == 1 )) && set_rapl; log "holding $(mode_name "$m"); OCCN keepalive every ${REFRESH_SECS}s"
+        while :; do keepalive; sleep "$REFRESH_SECS"; done ;;
+    *) sed -n '2,25p' "$0" ;;
+esac

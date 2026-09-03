@@ -1,0 +1,540 @@
+<title>The 45 Watt Ceiling</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+:root {
+  --bg:        #E9EDF1;
+  --surface:   #FFFFFF;
+  --surface-2: #DFE5EB;
+  --ink:       #14181D;
+  --ink-muted: #57626D;
+  --ink-faint: #7E8A95;
+  --rule:      #C6D0D9;
+  --rule-soft: #DCE3E9;
+  --accent:    #A85124;
+  --accent-bg: #F3E4DA;
+  --ok:        #1F6B58;
+  --ok-bg:     #DCEAE5;
+  --no:        #98352E;
+  --no-bg:     #F2DEDC;
+  --wait:      #8A6716;
+  --wait-bg:   #F0E7CF;
+  --shadow:    0 1px 2px rgba(20,24,29,.06), 0 6px 20px -12px rgba(20,24,29,.28);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:        #101418;
+    --surface:   #181D23;
+    --surface-2: #212831;
+    --ink:       #E5EAEF;
+    --ink-muted: #9BA6B1;
+    --ink-faint: #76818C;
+    --rule:      #2C343D;
+    --rule-soft: #232A32;
+    --accent:    #E08A54;
+    --accent-bg: #2E2019;
+    --ok:        #4FB394;
+    --ok-bg:     #16261F;
+    --no:        #E0776C;
+    --no-bg:     #2A1918;
+    --wait:      #D2A64A;
+    --wait-bg:   #262013;
+    --shadow:    0 1px 2px rgba(0,0,0,.4), 0 8px 24px -14px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"] {
+  --bg:        #101418;
+  --surface:   #181D23;
+  --surface-2: #212831;
+  --ink:       #E5EAEF;
+  --ink-muted: #9BA6B1;
+  --ink-faint: #76818C;
+  --rule:      #2C343D;
+  --rule-soft: #232A32;
+  --accent:    #E08A54;
+  --accent-bg: #2E2019;
+  --ok:        #4FB394;
+  --ok-bg:     #16261F;
+  --no:        #E0776C;
+  --no-bg:     #2A1918;
+  --wait:      #D2A64A;
+  --wait-bg:   #262013;
+  --shadow:    0 1px 2px rgba(0,0,0,.4), 0 8px 24px -14px rgba(0,0,0,.7);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+  font-size: 17px;
+  line-height: 1.62;
+  margin: 0;
+  padding: 0 20px 96px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.wrap { max-width: 940px; margin: 0 auto; }
+.prose { max-width: 66ch; }
+
+h1, h2, h3, .lbl, th, .num, .btn {
+  font-family: Archivo, "Helvetica Neue", Arial, sans-serif;
+}
+
+code, .mono, td.d, .reg {
+  font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- masthead ---------- */
+.mast {
+  padding: 56px 0 28px;
+  border-bottom: 2px solid var(--ink);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.lbl {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+h1 {
+  font-size: clamp(34px, 6vw, 52px);
+  font-weight: 700;
+  letter-spacing: -.02em;
+  line-height: 1.04;
+  margin: 0;
+  text-wrap: balance;
+}
+.dek {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--ink-muted);
+  font-size: 18.5px;
+}
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  padding-top: 6px;
+  font-size: 12.5px;
+  color: var(--ink-faint);
+}
+.meta span { font-family: "IBM Plex Mono", monospace; }
+
+/* ---------- headline number ---------- */
+.verdict {
+  margin: 40px 0 0;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--accent);
+  border-radius: 3px;
+  box-shadow: var(--shadow);
+  padding: 26px 28px;
+  display: grid;
+  gap: 22px;
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (min-width: 720px) {
+  .verdict { grid-template-columns: 230px minmax(0, 1fr); align-items: start; }
+}
+.bignum {
+  font-family: Archivo, sans-serif;
+  font-size: 60px;
+  font-weight: 700;
+  line-height: .92;
+  letter-spacing: -.03em;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.bignum small { display: block; font-size: 13px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); margin-top: 10px; }
+.verdict p { margin: 0 0 12px; }
+.verdict p:last-child { margin-bottom: 0; }
+
+/* ---------- sections ---------- */
+section { margin-top: 58px; }
+h2 {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 20px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--rule);
+}
+h3 {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  margin: 0 0 6px;
+  text-wrap: balance;
+}
+p { margin: 0 0 14px; }
+p:last-child { margin-bottom: 0; }
+
+/* ---------- tables ---------- */
+.scroll { overflow-x: auto; margin: 0 0 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 15px; }
+th {
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding: 0 16px 9px 0;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+td {
+  padding: 11px 16px 11px 0;
+  border-bottom: 1px solid var(--rule-soft);
+  vertical-align: top;
+}
+td.d { font-size: 14px; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+.em { color: var(--accent); font-weight: 600; }
+
+/* ---------- verdict chips ---------- */
+.chip {
+  display: inline-block;
+  font-family: Archivo, sans-serif;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+.chip.ok   { background: var(--ok-bg);   color: var(--ok); }
+.chip.no   { background: var(--no-bg);   color: var(--no); }
+.chip.wait { background: var(--wait-bg); color: var(--wait); }
+
+/* ---------- task list ---------- */
+.tasks { display: flex; flex-direction: column; gap: 18px; }
+.task {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  box-shadow: var(--shadow);
+  padding: 22px 24px;
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+}
+@media (min-width: 720px) {
+  .task { grid-template-columns: 42px minmax(0, 1fr); }
+}
+.num {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.task.key { border-left: 3px solid var(--accent); }
+.task-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+.task-body > p { max-width: 64ch; }
+.why {
+  margin-top: 12px;
+  padding-left: 14px;
+  border-left: 2px solid var(--rule);
+  color: var(--ink-muted);
+  font-size: 15.5px;
+  max-width: 62ch;
+}
+.why b { color: var(--ink); font-weight: 600; }
+
+ul.steps { margin: 12px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 9px; }
+ul.steps li {
+  position: relative;
+  padding-left: 22px;
+  font-size: 15.5px;
+  max-width: 64ch;
+}
+ul.steps li::before {
+  content: "";
+  position: absolute;
+  left: 4px; top: .68em;
+  width: 5px; height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+code {
+  font-size: .875em;
+  background: var(--surface-2);
+  border-radius: 2px;
+  padding: 1.5px 5px;
+}
+.task code, .why code { background: var(--surface-2); }
+
+/* ---------- gate ---------- */
+.gate {
+  margin: 30px 0;
+  padding: 20px 22px;
+  border: 1px dashed var(--rule);
+  border-radius: 3px;
+  background: var(--accent-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.gate .lbl { color: var(--accent); }
+.gate p { max-width: 64ch; margin: 0; }
+
+/* ---------- bring back ---------- */
+.bring {
+  margin-top: 20px;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 6px 24px 18px;
+  box-shadow: var(--shadow);
+}
+.bring table td:first-child { width: 46%; }
+
+footer {
+  margin-top: 64px;
+  padding-top: 22px;
+  border-top: 1px solid var(--rule);
+  color: var(--ink-faint);
+  font-size: 14px;
+  max-width: 66ch;
+}
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <div class="lbl">OMEN 17-cb0xxx &middot; board 8603 &middot; field notes</div>
+    <h1>The 45&nbsp;Watt Ceiling</h1>
+    <p class="dek">Everything the Linux side can measure, and the one number only Windows can settle.</p>
+    <div class="meta">
+      <span>i7-9750H</span>
+      <span>RTX 2080</span>
+      <span>BIOS F.53</span>
+      <span>kernel 7.1.9-arch1-2</span>
+      <span>2026-08-29</span>
+    </div>
+  </header>
+
+  <div class="verdict">
+    <div class="bignum">44.8<small>watts sustained</small></div>
+    <div>
+      <p>Under 60&nbsp;seconds of 12-thread load, this machine settles at <strong>44.8&nbsp;W in every thermal profile</strong>. Performance minus balanced is <strong>&minus;0.1&nbsp;W</strong>. Two performance runs agree to 0.1&nbsp;W.</p>
+      <p>Before that it boosts to <strong>84&ndash;88&nbsp;W at 4.00&nbsp;GHz for 10&ndash;16&nbsp;seconds</strong>, governed by PL2, then steps hard to 45&nbsp;W with PL1 as the limiter. That boost is where the retracted &ldquo;88&nbsp;W performance mode&rdquo; figure came from.</p>
+      <p>Nothing reachable from the operating system moves the sustained number.</p>
+    </div>
+  </div>
+
+  <section>
+    <h2>What the profile actually changes</h2>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>Profile</th><th>MSR 0x610 PL1</th><th>MMIO 0xFED159A0 PL1</th><th>EC[0x29]</th><th>Delivered</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="d">cool</td><td class="d">45 W</td><td class="d">90 W</td><td class="d">0x02</td><td class="d">45 W</td></tr>
+          <tr><td class="d">balanced</td><td class="d">45 W</td><td class="d">90 W</td><td class="d">0x00</td><td class="d">44.8 W</td></tr>
+          <tr><td class="d"><strong>performance</strong></td><td class="d em">90 W</td><td class="d em">90 W</td><td class="d">0x01</td><td class="d em">44.8 W</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="prose" style="margin-top:16px">In performance mode <em>both</em> power-limit registers read 90&nbsp;W and the package still delivers 45&nbsp;W, so <code>min(MSR, MMIO)</code> does not explain it either. The MSR is inert in both directions &mdash; forcing PL1 down to 30&nbsp;W under load changed nothing. The MMIO copy never moves at all. <code>MSR 0x64F</code> names PL1 as the active limiter throughout, whatever the registers say.</p>
+  </section>
+
+  <section>
+    <h2>Hypotheses tested on Linux</h2>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>Hypothesis</th><th>Test</th><th>Result</th><th>Verdict</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Board 8603 missing from the driver allowlist</td>
+            <td>Resolved the array out of the shipped module</td>
+            <td class="d">already present</td>
+            <td><span class="chip no">obsolete</span></td>
+          </tr>
+          <tr>
+            <td>Driver sends the wrong buffer shape for <code>0x1A</code></td>
+            <td>Issued 2-byte and 4-byte forms directly</td>
+            <td class="d">identical</td>
+            <td><span class="chip no">refuted</span></td>
+          </tr>
+          <tr>
+            <td>RAPL PL1 needs writing from userspace</td>
+            <td>Forced PL1 to 30 W under load</td>
+            <td class="d">still 44.8 W</td>
+            <td><span class="chip no">refuted</span></td>
+          </tr>
+          <tr>
+            <td>The MSR alone is not enough (ThrottleStop <code>SyncMMIO</code>)</td>
+            <td>Read MCHBAR+0x59A0 in all profiles</td>
+            <td class="d">pinned 90 W</td>
+            <td><span class="chip no">refuted</span></td>
+          </tr>
+          <tr>
+            <td>The EC reverts the mode unless a host owns it</td>
+            <td>Re-asserted <code>0x1A</code> every 3 s for 60 s</td>
+            <td class="d">44.6 vs 44.9 W</td>
+            <td><span class="chip no">refuted</span></td>
+          </tr>
+          <tr>
+            <td>OMEN&rsquo;s full take-control handshake is required</td>
+            <td><code>0x1A</code>+<code>0x27</code>+<code>0x10</code>, then <code>0x23</code> every 2 s</td>
+            <td class="d">44.3 vs 44.9 W</td>
+            <td><span class="chip no">refuted</span></td>
+          </tr>
+          <tr>
+            <td>Thermal throttling</td>
+            <td>Package temp during the clamp</td>
+            <td class="d">56&ndash;63&nbsp;&deg;C / limit 100</td>
+            <td><span class="chip no">refuted</span></td>
+          </tr>
+          <tr>
+            <td>Adapter cannot supply more than 45 W to the CPU</td>
+            <td>Not readable from Linux</td>
+            <td class="d">&mdash;</td>
+            <td><span class="chip wait">open</span></td>
+          </tr>
+          <tr>
+            <td>Always-on dGPU reserves a shared power budget</td>
+            <td>Runtime D3 disabled; 7.85 W at idle</td>
+            <td class="d">plausible</td>
+            <td><span class="chip wait">open</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Settled along the way</h2>
+    <p class="prose">Two genuine driver bugs, both fixed and installed via DKMS. First, <code>hp-wmi</code> seeds the profile from <code>ec_read(0x95)</code>, but on this board that offset holds an ASCII string, so it read <code>0x37</code>, returned <code>-EINVAL</code>, and disabled <code>platform_profile</code> <em>silently</em> because the setup return value is discarded. Second, the firmware echoes every profile write back as an Fn+P keypress, which the driver turned into <code>platform_profile_cycle()</code> &mdash; a feedback loop measured at roughly 900 profile changes per second.</p>
+    <p class="prose">Running your <code>ec-calibrate</code> diff from Linux &mdash; finally possible once the driver could switch modes &mdash; found the real thermal profile byte at <strong><code>EC[0x29]</code></strong>, holding <code>0x02</code>/<code>0x00</code>/<code>0x01</code> for cool/balanced/performance. No other EC byte tracks the mode.</p>
+    <p class="prose">And the premise itself is shaky: <code>FINDINGS.md</code> &sect;5c says outright, <em>&ldquo;Still unmeasured: actual package watts per mode.&rdquo;</em> The 90&nbsp;W target is a ThrottleStop <code>.ini</code> <strong>setting</strong>, never a measurement. The Windows evidence for performance mode is clock-only &mdash; 3.59 vs 3.01&nbsp;GHz &mdash; and an FP load at 45&nbsp;W runs at about 3.4&nbsp;GHz on this machine.</p>
+  </section>
+
+  <section>
+    <h2>What to collect in Windows</h2>
+
+    <div class="tasks">
+
+      <div class="task key">
+        <div class="num">1</div>
+        <div class="task-body">
+          <div class="task-head"><h3>Sustained package power, per mode</h3><span class="chip ok">decisive</span></div>
+          <p>Install <strong>HWiNFO64</strong>, start it in sensors-only mode, and log to CSV.</p>
+          <ul class="steps">
+            <li>Set OMEN Gaming Hub to <strong>Performance</strong>. Run Cinebench R23 multi-core, or Prime95 Small FFT, for <strong>at least 5 minutes</strong>.</li>
+            <li>Repeat on <strong>Balanced</strong>.</li>
+            <li>From each log, read <em>CPU Package Power</em> averaged over a window <strong>starting 60&nbsp;s after the load begins</strong> &mdash; never the first 20 s.</li>
+            <li>Also note: <em>CPU Package Power Limit&nbsp;1</em> and <em>Limit&nbsp;2</em>, <em>CPU Package temperature</em>, average core clock, and the <em>Power Limit Exceeded</em> yes/no flags.</li>
+          </ul>
+          <div class="why"><b>Why it decides everything.</b> Linux sustains 44.8 W in every mode. If Windows performance mode also sustains about 45 W, this laptop is a 45 W machine by design, both hypotheses below die, and the investigation closes. If it sustains 65&nbsp;W or more, something in the HP stack does something we have not found &mdash; and tasks 4&ndash;6 become the hunt for it.</div>
+        </div>
+      </div>
+
+      <div class="task">
+        <div class="num">2</div>
+        <div class="task-body">
+          <div class="task-head"><h3>Power adapter rating</h3></div>
+          <p>Read the wattage printed on the brick, and check what the machine thinks is attached.</p>
+          <ul class="steps">
+            <li>The label on the adapter itself &mdash; the 17-cb0 with an RTX 2080 normally ships a 200&ndash;230&nbsp;W supply.</li>
+            <li>In HWiNFO, look for a <em>Smart Adapter</em> or AC adapter field, and note anything it reports about rated wattage.</li>
+          </ul>
+          <div class="why"><b>Why.</b> A hard clamp at exactly the CPU&rsquo;s 45&nbsp;W TDP, with 39&nbsp;&deg;C of thermal headroom and no register explaining it, is exactly what an EC does when the supply is undersized. If you are on a lower-wattage or third-party adapter, that is very likely the whole answer. Linux cannot read this.</div>
+        </div>
+      </div>
+
+      <div class="task">
+        <div class="num">3</div>
+        <div class="task-body">
+          <div class="task-head"><h3>What the dGPU is doing</h3></div>
+          <p>During the <em>CPU-only</em> load from task 1, record the GPU&rsquo;s state in HWiNFO: GPU power draw, whether it is asleep or powered.</p>
+          <div class="why"><b>Why.</b> On Arch the RTX 2080 never powers down &mdash; <code>Runtime D3: Disabled by default</code>, idling at 7.85&nbsp;W. If Windows parks it properly and the EC hands out a shared CPU+GPU budget, an always-on GPU could be why Linux gets pinned at 45&nbsp;W. Comparing the two states tells us whether that is worth chasing.</div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="gate">
+      <div class="lbl">Stop here if task 1 shows ~45 W</div>
+      <p>That result closes the question, and tasks 4&ndash;6 are wasted effort. Only continue below if Windows sustains meaningfully more power than Linux does.</p>
+    </div>
+
+    <div class="tasks">
+
+      <div class="task">
+        <div class="num">4</div>
+        <div class="task-body">
+          <div class="task-head"><h3>A WMI trace taken <em>during</em> load</h3><span class="chip wait">conditional</span></div>
+          <p>Clear <code>%LOCALAPPDATA%\HPOMEN\HPOMENBG_*.log</code>, switch to Performance, then run the load for two full minutes and capture the log.</p>
+          <div class="why"><b>Why this differs from what you already captured.</b> The original trace was taken while clicking through modes, almost certainly at idle. Every command in it has now been replayed from Linux and none of them lift the clamp. If OMEN sends something <em>15&nbsp;seconds into a sustained load</em> &mdash; when the EC would be applying the clamp &mdash; that command has never appeared in any capture we have.</div>
+        </div>
+      </div>
+
+      <div class="task">
+        <div class="num">5</div>
+        <div class="task-body">
+          <div class="task-head"><h3>EC dump under load</h3><span class="chip wait">conditional</span></div>
+          <p>With <strong>RWEverything</strong>, dump embedded-controller offsets <code>0x00</code>&ndash;<code>0xFF</code> in Performance mode <em>while the load is running</em>. A second dump on Balanced makes it far more useful.</p>
+          <div class="why"><b>Why.</b> Direct comparison against the Linux dumps. We know <code>EC[0x29]</code> is the profile byte and that no other byte tracks the mode <em>at idle</em>. If Windows sets some additional EC byte under load that Linux never sets, that byte is the lever.</div>
+        </div>
+      </div>
+
+      <div class="task">
+        <div class="num">6</div>
+        <div class="task-body">
+          <div class="task-head"><h3>The two registers, read in Windows</h3><span class="chip wait">conditional</span></div>
+          <p>In Performance mode under load, capture both:</p>
+          <ul class="steps">
+            <li><code>MSR 0x610</code> &mdash; ThrottleStop&rsquo;s TPL window shows PL1/PL2 directly.</li>
+            <li><code>MCHBAR + 0x59A0</code>, physical address <code>0xFED159A0</code> &mdash; readable in RWEverything&rsquo;s memory view.</li>
+          </ul>
+          <div class="why"><b>Why.</b> Straight comparison with the Linux values in the table above. If Windows shows something different in either register while sustaining more power, that is the mechanism, in one line.</div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2>Linux reference values, for comparing in place</h2>
+    <div class="bring">
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Measurement</th><th>Value on Arch</th></tr></thead>
+          <tbody>
+            <tr><td>Sustained package power, all three profiles</td><td class="d">44.7 &ndash; 44.8 W</td></tr>
+            <tr><td>Boost power / duration / clock</td><td class="d">84&ndash;88 W, 10&ndash;16 s, 4.00 GHz</td></tr>
+            <tr><td>Package temp during the clamp</td><td class="d">56 &ndash; 63 &deg;C</td></tr>
+            <tr><td><code>MSR 0x610</code> PL1, performance / balanced</td><td class="d">90 W / 45 W</td></tr>
+            <tr><td><code>MCHBAR 0xFED159A0</code> PL1, all profiles</td><td class="d">90 W</td></tr>
+            <tr><td><code>EC[0x29]</code>, cool / balanced / performance</td><td class="d">0x02 / 0x00 / 0x01</td></tr>
+            <tr><td>GPU at idle during CPU load</td><td class="d">7.85 W, P8, never off</td></tr>
+            <tr><td>Battery state during all tests</td><td class="d">Full, not charging</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Bring back: the two HWiNFO CSV logs, the adapter wattage, and &mdash; only if task&nbsp;1 justifies it &mdash; the OMEN log, the EC dumps, and the two register values. Task&nbsp;1 alone is enough to close or reopen the whole question.
+  </footer>
+
+</div>

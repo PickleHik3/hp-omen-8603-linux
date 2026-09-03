@@ -1,0 +1,76 @@
+--- a/drivers/platform/x86/hp/hp-wmi.c
++++ b/drivers/platform/x86/hp/hp-wmi.c
+@@ -22,6 +22,7 @@
+ #include <linux/init.h>
+ #include <linux/input.h>
+ #include <linux/input/sparse-keymap.h>
++#include <linux/jiffies.h>
+ #include <linux/kernel.h>
+ #include <linux/limits.h>
+ #include <linux/minmax.h>
+@@ -454,6 +455,39 @@
+ static struct device *platform_profile_device;
+ static struct notifier_block platform_power_source_nb;
+ static enum platform_profile_option active_platform_profile;
++
++/*
++ * Some OMEN boards answer a thermal profile write with an HPWMI_FN_P_HOTKEY
++ * notification, exactly as if the user had pressed Fn+P. Cycling the platform
++ * profile in response issues another thermal profile write, which produces
++ * another notification: on board 8603 (OMEN 17-cb0xxx) this spins the profile
++ * at roughly 900 changes per second from the moment platform_profile is
++ * registered, making the interface unusable and pinning a CPU in kworker.
++ *
++ * Record when the driver last wrote the thermal profile itself, and ignore
++ * Fn+P notifications that arrive in the immediate aftermath.
++ */
++#define HP_WMI_PROFILE_ECHO_GUARD_MS	300
++
++/* jiffies of the last driver-initiated profile write; 0 means "never". */
++static unsigned long hp_wmi_last_profile_write;
++
++static void hp_wmi_mark_profile_write(void)
++{
++	/* jiffies is legitimately 0 twice per wrap, bias it to keep 0 free */
++	WRITE_ONCE(hp_wmi_last_profile_write, jiffies | 1UL);
++}
++
++static bool hp_wmi_is_profile_write_echo(void)
++{
++	unsigned long stamp = READ_ONCE(hp_wmi_last_profile_write);
++
++	if (!stamp)
++		return false;
++
++	return time_before(jiffies,
++			   stamp + msecs_to_jiffies(HP_WMI_PROFILE_ECHO_GUARD_MS));
++}
+ static bool platform_profile_support;
+ static bool zero_insize_support;
+ 
+@@ -1191,6 +1225,15 @@
+ 			pr_info("Unknown key code - 0x%x\n", key_code);
+ 		break;
+ 	case HPWMI_FN_P_HOTKEY:
++		/*
++		 * Drop the notification the firmware echoes back at our own
++		 * thermal profile write; see hp_wmi_last_profile_write.
++		 */
++		if (hp_wmi_is_profile_write_echo()) {
++			pr_debug("Ignoring Fn+P echo of a driver profile write\n");
++			break;
++		}
++
+ 		platform_profile_cycle();
+ 		break;
+ 	case HPWMI_OMEN_KEY:
+@@ -1625,7 +1668,9 @@
+ 		return -EOPNOTSUPP;
+ 	}
+ 
++	hp_wmi_mark_profile_write();
+ 	err = omen_thermal_profile_set(tp);
++	hp_wmi_mark_profile_write();
+ 	if (err < 0)
+ 		return err;
+ 

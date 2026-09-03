@@ -1,0 +1,18 @@
+[Unit]
+Description=Assert OMEN firmware performance profile at boot
+Documentation=https://github.com/PickleHik3/hp-omen-8603-linux
+After=multi-user.target
+# Only on AC: the firmware refuses/reverts performance mode on battery.
+ConditionACPower=true
+ConditionPathExists=/sys/firmware/acpi/platform_profile
+# power-profiles-daemon manages the profile itself; do not fight it.
+Conflicts=power-profiles-daemon.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo performance > /sys/firmware/acpi/platform_profile'
+ExecStop=/bin/sh -c 'echo balanced > /sys/firmware/acpi/platform_profile'
+
+[Install]
+WantedBy=multi-user.target

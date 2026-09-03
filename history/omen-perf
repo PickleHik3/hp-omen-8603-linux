@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# SUPERSEDED 2026-09-03: the heartbeat now lives in the kernel module (omen8603-linux/patches/0003)
+# and the RAPL follower is omen8603-linux/tools/omen-power. Do not run this alongside them.
+# omen-perf — sets the OMEN "Performance" thermal mode on the
+# OMEN 17-cb0xxx (Santorini, board 8603, i7-9750H) under Linux.
+#
+# This is the FALLBACK route. The primary fix is patching hp-wmi to recognise
+# board 8603 — see hp-wmi-8603.md. Use this if the kernel route stalls, or to
+# prove the EC byte works before writing any kernel code.
+#
+# What it does, and why:
+#   Measured on this machine (see FINDINGS.md §3), the 45 -> 90 W ramp is
+#   performed autonomously by EC/BIOS firmware. OMEN Gaming Hub writes NOTHING
+#   to MSR 0x610 during load -- IsDynamicPowerLimitSupport = False. So all that
+#   is needed is to set the mode byte and keep it set, because the EC reverts it
+#   when no host software owns it. OMEN itself re-asserts on boot and logon.
+#
+#   The RAPL PL1 ramp is therefore NOT needed and is OFF by default. It is kept
+#   behind ENABLE_PL1_RAMP=1 only in case the EC mode alone doesn't get you to
+#   90 W on your kernel.
+#
+# Requirements: root, CONFIG_ACPI_EC_DEBUGFS (ec_sys module).
+#
+# Run `ec-calibrate` FIRST and set EC_PERF to your measured value.
+
+set -uo pipefail
+
+# ---------------- tunables (env-overridable) ----------------
+EC_OFFSET=${EC_OFFSET:-0x29}      # mode byte: bits1:0 = OCCM (see FINDINGS-2026-09-03-windows.md); 0x95 was WRONG (serial string)
+EC_PERF=${EC_PERF:-0x01}          # 0x01 = performance, confirmed from OMEN WMI trace
+EC_RESTORE=${EC_RESTORE:-0x00}    # value to put back on exit
+EC_REASSERT_SECS=${EC_REASSERT_SECS:-10}
+
+ENABLE_PL1_RAMP=${ENABLE_PL1_RAMP:-0}   # leave 0; see header
+
+PL1_FLOOR_W=${PL1_FLOOR_W:-45}
+PL1_CEIL_W=${PL1_CEIL_W:-90}
+PL2_W=${PL2_W:-90}
+STEP_UP_W=${STEP_UP_W:-5}
+STEP_DOWN_W=${STEP_DOWN_W:-5}
+TEMP_TARGET=${TEMP_TARGET:-93}
+TEMP_MAX=${TEMP_MAX:-95}
+INTERVAL=${INTERVAL:-1}
+
+EC=/sys/kernel/debug/ec/ec0/io
+VERBOSE=${VERBOSE:-0}
+
+log()  { printf '[omen-perf] %s\n' "$*"; }
+warn() { printf '[omen-perf] warning: %s\n' "$*" >&2; }
+die()  { printf '[omen-perf] error: %s\n' "$*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || die "must run as root"
+
+# ---------------- EC access ----------------
+ec_available=0
+ec_init() {
+    mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+    if [[ ! -w $EC ]]; then
+        modprobe -r ec_sys 2>/dev/null
+        modprobe ec_sys write_support=1 2>/dev/null
+    fi
+    if [[ -w $EC ]]; then
+        ec_available=1
+    else
+        die "no writable $EC — load it with: modprobe ec_sys write_support=1
+(needs CONFIG_ACPI_EC_DEBUGFS; check grep ACPI_EC_DEBUGFS /boot/config-\$(uname -r))"
+    fi
+}
+
+ec_read_byte()  { od -An -tu1 -j "$1" -N1 "$EC" 2>/dev/null | tr -d ' \n'; }
+ec_write_byte() {
+    printf "$(printf '\\x%02X' "$2")" \
+        | dd of="$EC" bs=1 seek="$1" count=1 conv=notrunc status=none 2>/dev/null
+}
+
+assert_mode() {
+    local want=$1 got
+    ec_write_byte "$(( EC_OFFSET ))" "$(( want ))"
+    got=$(ec_read_byte "$(( EC_OFFSET ))")
+    if (( got != want )); then
+        warn "EC[$EC_OFFSET] wrote $(printf '0x%02X' "$want") but reads back $(printf '0x%02X' "$got")"
+        return 1
+    fi
+    return 0
+}
+
+# ---------------- RAPL (only when ENABLE_PL1_RAMP=1) ----------------
+declare -a ZONES=()
+rapl_init() {
+    modprobe intel_rapl_msr 2>/dev/null
+    local z n
+    for z in /sys/class/powercap/*; do
+        [[ -d $z && -f $z/name ]] || continue
+        [[ $(basename "$z") == intel-rapl* ]] || continue
+        n=$(<"$z/name"); [[ $n == package-* ]] || continue
+        [[ -w $z/constraint_0_power_limit_uw ]] || continue
+        ZONES+=("$z")
+    done
+    (( ${#ZONES[@]} )) || die "no writable intel-rapl package zone found"
+    log "RAPL zones: ${ZONES[*]}"
+    (( ${#ZONES[@]} == 1 )) && warn "only one RAPL zone — if power still caps, check for intel-rapl-mmio (effective limit is the MIN of both)"
+}
+
+set_pl() {
+    local w=$1 z
+    for z in "${ZONES[@]}"; do
+        echo $(( w * 1000000 )) > "$z/constraint_0_power_limit_uw" 2>/dev/null
+        [[ -w $z/constraint_1_power_limit_uw ]] && \
+            echo $(( PL2_W * 1000000 )) > "$z/constraint_1_power_limit_uw" 2>/dev/null
+    done
+}
+
+TEMP_PATH=""
+temp_init() {
+    local h l zdir
+    for h in /sys/class/hwmon/hwmon*; do
+        [[ -f $h/name && $(<"$h/name") == coretemp ]] || continue
+        for l in "$h"/temp*_label; do
+            [[ -f $l && $(<"$l") == "Package id 0" ]] || continue
+            TEMP_PATH="${l%_label}_input"; return
+        done
+    done
+    for zdir in /sys/class/thermal/thermal_zone*; do
+        [[ -f $zdir/type && $(<"$zdir/type") == x86_pkg_temp ]] || continue
+        TEMP_PATH="$zdir/temp"; return
+    done
+    die "no package temperature sensor found (load coretemp?)"
+}
+read_temp() { echo $(( $(<"$TEMP_PATH") / 1000 )); }
+
+# ---------------- lifecycle ----------------
+cleanup() {
+    log "restoring EC[$EC_OFFSET] to $EC_RESTORE"
+    (( ec_available )) && ec_write_byte "$(( EC_OFFSET ))" "$(( EC_RESTORE ))"
+    (( ENABLE_PL1_RAMP )) && (( ${#ZONES[@]} )) && set_pl "$PL1_FLOOR_W"
+    exit 0
+}
+
+do_status() {
+    ec_init
+    printf '[omen-perf] EC[%s] = 0x%02X\n' "$EC_OFFSET" "$(ec_read_byte "$(( EC_OFFSET ))")"
+    if [[ -r /sys/firmware/acpi/platform_profile ]]; then
+        log "platform_profile: $(</sys/firmware/acpi/platform_profile) (choices: $(</sys/firmware/acpi/platform_profile_choices))"
+    else
+        log "platform_profile: absent (expected until hp-wmi knows board 8603)"
+    fi
+    local z
+    for z in /sys/class/powercap/intel-rapl*; do
+        [[ -f $z/name && -f $z/constraint_0_power_limit_uw ]] || continue
+        printf '[omen-perf]   %-22s %-12s PL1=%s W\n' "$(basename "$z")" "$(<"$z/name")" \
+               "$(( $(<"$z/constraint_0_power_limit_uw") / 1000000 ))"
+    done
+}
+
+do_run() {
+    ec_init
+    trap cleanup EXIT INT TERM
+    log "board 8603 / Santorini — asserting performance mode EC[$EC_OFFSET]=$EC_PERF"
+    assert_mode "$(( EC_PERF ))" && log "EC write verified"
+
+    if (( ENABLE_PL1_RAMP )); then
+        warn "PL1 ramp enabled — normally unnecessary on this platform (see FINDINGS.md §3)"
+        rapl_init; temp_init
+    else
+        log "PL1 ramp disabled (correct default) — EC firmware handles the 45->90 W ramp"
+    fi
+
+    local pl1=$PL1_FLOOR_W t=0 since_ec=$EC_REASSERT_SECS
+    while :; do
+        if (( since_ec >= EC_REASSERT_SECS )); then
+            ec_write_byte "$(( EC_OFFSET ))" "$(( EC_PERF ))"
+            since_ec=0
+        fi
+
+        if (( ENABLE_PL1_RAMP )); then
+            t=$(read_temp)
+            if   (( t >= TEMP_MAX ));    then pl1=$(( pl1 - STEP_DOWN_W ))
+            elif (( t <  TEMP_TARGET )); then pl1=$(( pl1 + STEP_UP_W ))
+            fi
+            (( pl1 > PL1_CEIL_W ))  && pl1=$PL1_CEIL_W
+            (( pl1 < PL1_FLOOR_W )) && pl1=$PL1_FLOOR_W
+            set_pl "$pl1"
+            (( VERBOSE )) && log "temp=${t}C pl1=${pl1}W"
+        fi
+
+        sleep "$INTERVAL"
+        since_ec=$(( since_ec + INTERVAL ))
+    done
+}
+
+case ${1-run} in
+    run)    do_run ;;
+    status) do_status ;;
+    *) cat <<'EOF'
+usage:
+  sudo ./omen-perf run       assert performance mode and hold it (foreground)
+  sudo ./omen-perf status    show EC byte, platform_profile, RAPL zones
+
+env: EC_PERF EC_OFFSET EC_REASSERT_SECS ENABLE_PL1_RAMP=1 PL1_CEIL_W VERBOSE=1
+EOF
+       ;;
+esac

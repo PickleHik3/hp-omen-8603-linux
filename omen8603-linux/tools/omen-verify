@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# omen-verify - health check for the patched hp-wmi driver on OMEN board 8603.
+# Read-only; safe to run any time. No root needed for most checks.
+
+pass(){ printf '  \033[32mOK\033[0m   %s\n' "$*"; }
+fail(){ printf '  \033[31mFAIL\033[0m %s\n' "$*"; RC=1; }
+warn(){ printf '  \033[33mWARN\033[0m %s\n' "$*"; }
+RC=0
+
+echo "== machine =="
+printf '  board %s / BIOS %s / %s\n' \
+  "$(cat /sys/class/dmi/id/board_name)" "$(cat /sys/class/dmi/id/bios_version)" \
+  "$(cat /sys/class/dmi/id/product_name)"
+printf '  kernel %s\n' "$(uname -r)"
+[[ $(cat /sys/class/dmi/id/board_name) == 8603 ]] && pass "board 8603" || warn "not board 8603"
+
+PP=""
+for c in /sys/class/platform-profile/*/profile; do [[ -e $c ]] && PP=$c && break; done
+
+echo "== module =="
+mod=$(modinfo -n hp_wmi 2>/dev/null)
+printf '  %s\n' "${mod:-not found}"
+if [[ $mod == *updates/dkms* ]]; then pass "patched DKMS module is what modprobe resolves"
+else fail "modprobe resolves the in-tree module - run install.sh"; fi
+lsmod | grep -q '^hp_wmi' && pass "hp_wmi loaded" || fail "hp_wmi not loaded"
+dkms status -m hp-wmi-8603 2>/dev/null | grep -q installed \
+  && pass "dkms: $(dkms status -m hp-wmi-8603 | head -1)" || warn "not registered with dkms"
+[[ $(dkms status -m hp-wmi-8603 2>/dev/null | grep -c installed) -le 1 ]] \
+  || fail "more than one hp-wmi-8603 version registered with dkms - rerun install.sh"
+
+echo "== EC host-alive heartbeat (patch 0003) =="
+hb=/sys/module/hp_wmi/parameters/omen_host_alive_secs
+if [[ -r $hb ]]; then
+    v=$(<$hb)
+    (( v > 0 && v <= 60 )) && pass "hp_wmi sends WMI 0x10/0x23 every ${v}s (OCCN expires after 60-75 s)" \
+                            || fail "omen_host_alive_secs=$v - must be 1..60 or the EC latches to 45 W"
+    if [[ $EUID -eq 0 ]]; then
+        modprobe ec_sys 2>/dev/null
+        if [[ -r /sys/kernel/debug/ec/ec0/io ]]; then
+            e=$(od -An -tu1 -j 41 -N1 /sys/kernel/debug/ec/ec0/io | tr -d ' ')
+            printf '  EC[0x29]=0x%02X  mode=%d  maxfan=%d  OCCN=%d\n' "$e" $((e&3)) $(((e>>6)&1)) $(((e>>7)&1))
+            (( (e>>7)&1 )) && pass "host-alive bit (OCCN) is set" \
+                           || warn "OCCN reads 0 right now - run 'omen-power watch 60'; it must return to 1 within ${v}s"
+            m=$(cat "$PP" 2>/dev/null); declare -A want=([balanced]=0 [performance]=1 [cool]=2)
+            [[ -n $m && ${want[$m]-x} == $((e&3)) ]] && pass "EC mode bits agree with platform_profile ($m)" \
+                                                              || warn "EC mode=$((e&3)) but platform_profile=$m"
+        else
+            warn "ec_sys not available - cannot read EC[0x29]"
+        fi
+    else
+        printf '  (run as root to read EC[0x29] and confirm OCCN)\n'
+    fi
+else
+    fail "module has no omen_host_alive_secs parameter - patch 0003 not installed; the EC will latch to 45 W ~6 min after boot"
+fi
+
+echo "== platform_profile =="
+if [[ -n $PP ]]; then
+    pass "registered: $(cat "${PP%/profile}/name") -> $(cat "${PP%/profile}/choices")"
+    printf '  current: %s\n' "$(cat "$PP")"
+    a=$(cat "$PP"); sleep 0.3; b=$(cat "$PP")
+    [[ $a == "$b" ]] && pass "value is stable (no Fn+P echo storm)" \
+                     || fail "value changed between reads - echo guard not working"
+else
+    fail "no platform_profile - check: dmesg | grep hp_wmi"
+fi
+[[ -e /sys/firmware/acpi/platform_profile ]] && pass "legacy path present" || warn "legacy path absent"
+
+echo "== power =="
+for z in /sys/class/powercap/intel-rapl:*; do
+    [[ -f $z/name && $(<"$z/name") == package-* ]] || continue
+    printf '  %s: PL1=%sW PL2=%sW\n' "$(<"$z/name")" \
+      "$(( $(<"$z/constraint_0_power_limit_uw") / 1000000 ))" \
+      "$(( $(<"$z/constraint_1_power_limit_uw") / 1000000 ))"
+done
+printf '  AC online: %s\n' "$(cat /sys/class/power_supply/ACAD/online 2>/dev/null)"
+
+echo "== fan =="
+for h in /sys/class/hwmon/hwmon*; do
+    [[ -f $h/name && $(<"$h/name") == hp ]] || continue
+    pass "max-fan toggle at $h/pwm1_enable (= $(<"$h/pwm1_enable"); 0=max, 2=auto)"
+    printf '  fan1/fan2: %s / %s RPM (always 0 on this board - no tach over WMI)\n' \
+      "$(<"$h/fan1_input")" "$(<"$h/fan2_input")"
+done
+
+echo "== daemons =="
+if systemctl is-active --quiet omen-power; then
+    pass "omen-power.service active (RAPL follows platform_profile: perf 90/90 W, else 45/90 W)"
+else
+    fail "omen-power.service not active - MSR PL1 will not be raised to 90 W in performance (systemctl enable --now omen-power)"
+fi
+if systemctl is-active --quiet power-profiles-daemon; then
+    pd=$(powerprofilesctl 2>/dev/null | grep -m1 PlatformDriver | awk '{print $2}')
+    [[ $pd == platform_profile ]] && pass "power-profiles-daemon using platform_profile" \
+      || warn "power-profiles-daemon PlatformDriver=$pd (restart it: systemctl restart power-profiles-daemon)"
+else
+    printf '  power-profiles-daemon inactive\n'
+fi
+
+echo
+(( RC == 0 )) && echo "all good." || echo "problems found - see FAIL lines above."
+exit $RC

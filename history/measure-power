@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# measure-power - measure REAL package watts under load in each OMEN thermal mode.
+#
+# Answers the one question left open: does the firmware performance mode reach
+# 90 W on its own, or does it top out lower (meaning you also need a RAPL limit)?
+#
+# Windows can't answer this cheaply -- its Power Meter counters read 0 on this
+# machine and ThrottleStop won't log headlessly. Linux can: the RAPL energy
+# counter is just a sysfs file, and it is the same MSR 0x610 domain ThrottleStop
+# reads. Run this on Linux, on AC, with nothing else loading the CPU.
+#
+#   sudo ./measure-power
+#
+# Interpreting the result:
+#   performance approx 90 W  -> the mode command is the whole fix. Done.
+#   performance approx 65-75 W -> also set PL1/PL2 (see the tail of this script).
+
+set -uo pipefail
+
+EC=/sys/kernel/debug/ec/ec0/io
+EC_OFFSET=${EC_OFFSET:-0x95}
+SECS=${SECS:-45}          # measurement window per mode
+SETTLE=${SETTLE:-25}      # let the EC ramp before measuring
+COOL=${COOL:-60}
+
+die(){ printf 'error: %s\n' "$*" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || die "run as root"
+
+# ---- find the RAPL package zone ----
+ZONE=""
+for z in /sys/class/powercap/intel-rapl:*; do
+    [[ -f $z/name && -f $z/energy_uj ]] || continue
+    [[ $(<"$z/name") == package-* ]] || continue
+    ZONE=$z; break
+done
+[[ -n $ZONE ]] || die "no intel-rapl package zone with energy_uj (modprobe intel_rapl_msr)"
+MAXE=$(<"$ZONE/max_energy_range_uj")
+echo "RAPL zone : $ZONE ($(<"$ZONE/name"))"
+[[ -f $ZONE/constraint_0_power_limit_uw ]] &&
+  echo "PL1 now   : $(( $(<"$ZONE/constraint_0_power_limit_uw") / 1000000 )) W"
+[[ -f $ZONE/constraint_1_power_limit_uw ]] &&
+  echo "PL2 now   : $(( $(<"$ZONE/constraint_1_power_limit_uw") / 1000000 )) W"
+
+# ---- mode setting: prefer platform_profile, else raw EC ----
+PP=/sys/firmware/acpi/platform_profile
+have_pp=0
+[[ -w $PP ]] && have_pp=1
+if (( ! have_pp )); then
+    mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+    [[ -w $EC ]] || { modprobe -r ec_sys 2>/dev/null; modprobe ec_sys write_support=1 2>/dev/null; }
+    [[ -w $EC ]] || die "no platform_profile and no writable $EC"
+    echo "mode via : raw EC byte $EC_OFFSET (hp-wmi not patched yet)"
+else
+    echo "mode via : $PP  (choices: $(</sys/firmware/acpi/platform_profile_choices))"
+fi
+
+set_mode(){ # $1 = profile name, $2 = ec byte
+    if (( have_pp )); then echo "$1" > "$PP"
+    else printf "$(printf '\\x%02X' "$2")" | dd of="$EC" bs=1 seek="$(( EC_OFFSET ))" count=1 conv=notrunc status=none
+    fi
+}
+
+read_temp(){
+    local h l
+    for h in /sys/class/hwmon/hwmon*; do
+        [[ -f $h/name && $(<"$h/name") == coretemp ]] || continue
+        for l in "$h"/temp*_label; do
+            [[ -f $l && $(<"$l") == "Package id 0" ]] || continue
+            echo $(( $(<"${l%_label}_input") / 1000 )); return
+        done
+    done
+    echo 0
+}
+
+measure(){ # -> average watts over $SECS
+    local e1 e2 t1 t2 de dt
+    e1=$(<"$ZONE/energy_uj"); t1=$(date +%s%N)
+    sleep "$SECS"
+    e2=$(<"$ZONE/energy_uj"); t2=$(date +%s%N)
+    de=$(( e2 - e1 )); (( de < 0 )) && de=$(( de + MAXE ))
+    dt=$(( t2 - t1 ))
+    awk -v de="$de" -v dt="$dt" 'BEGIN{ printf "%.1f", (de/1e6)/(dt/1e9) }'
+}
+
+run_phase(){ # $1 label, $2 profile, $3 ec byte
+    echo
+    echo "--- $1 ---"
+    set_mode "$2" "$3"
+    sleep 2
+    local pids=()
+    for _ in $(seq "$(nproc)"); do ( while :; do :; done ) & pids+=($!); done
+    sleep "$SETTLE"
+    local w; w=$(measure)
+    local t; t=$(read_temp)
+    kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null
+    printf '  package power: %s W   pkg temp: %s C\n' "$w" "$t"
+    printf '%s' "$w"
+    sleep "$COOL"
+}
+
+echo
+echo "=== each phase: ${SETTLE}s settle, ${SECS}s measure, ${COOL}s cooldown ==="
+B=$(run_phase 'BALANCED / default (0x00)'    balanced    0x00)
+P=$(run_phase 'PERFORMANCE (0x01)'           performance 0x01)
+B2=$(run_phase 'BALANCED again (drift check)' balanced   0x00)
+
+echo
+echo "================ RESULT ================"
+printf '  balanced      %6s W\n' "$B"
+printf '  PERFORMANCE   %6s W\n' "$P"
+printf '  balanced (2)  %6s W\n' "$B2"
+echo
+awk -v p="$P" 'BEGIN{
+  if (p+0 >= 85)      print "  -> performance reaches ~90 W on its own. The mode command is the complete fix.";
+  else if (p+0 >= 60) print "  -> performance tops out below 90 W. Also set PL1/PL2 (command below).";
+  else                print "  -> unexpectedly low; check you are on AC and nothing else is throttling.";
+}'
+
+cat <<'EOF'
+
+If you need the power limit too, one shot, both zones (effective limit is the MIN):
+
+  for z in /sys/class/powercap/intel-rapl*:0; do
+    [ "$(cat $z/name)" = package-0 ] || continue
+    echo 90000000 | sudo tee $z/constraint_0_power_limit_uw
+    echo 90000000 | sudo tee $z/constraint_1_power_limit_uw
+  done
+
+Then re-run this script to confirm it took.
+EOF

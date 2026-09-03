@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""omen-power - keep the CPU power limits aligned with the OMEN thermal mode.
+
+OMEN 17-cb0xxx (board 8603). On Windows, OMEN Gaming Hub ramps MSR PL1 to 90 W
+in Performance mode and resets it to 45 W on every mode change; the EC releases
+or clamps the package according to the mode (see ../../FINDINGS-2026-09-03-windows.md).
+Under Linux the patched hp-wmi driver sets the mode and keeps the EC's host-alive
+watchdog fed. This daemon does the one thing left: it mirrors OMEN's power-limit
+policy onto the RAPL package zone(s) whenever platform_profile changes.
+
+    performance  -> PL1 90 W, PL2 90 W   (OMEN's ramp ceiling)
+    balanced     -> PL1 45 W, PL2 90 W   (OMEN's PL1DefaultValue; the EC clamps to 45 W anyway)
+    cool         -> PL1 45 W, PL2 90 W
+
+Usage:
+    omen-power daemon    follow platform_profile (poll()-driven, re-applied every 60 s)
+    omen-power apply     apply the limits for the current profile once
+    omen-power status    show profile, EC[0x29] (mode / max-fan / host-alive), RAPL limits
+    omen-power watch [S] print every change of EC[0x29] for S seconds (default 90)
+
+Environment overrides: OMEN_PL1_PERF, OMEN_PL2_PERF, OMEN_PL1_OTHER, OMEN_PL2_OTHER (watts).
+"""
+import glob
+import os
+import select
+import signal
+import subprocess
+import sys
+import time
+
+PROFILE_PATHS = (
+    "/sys/firmware/acpi/platform_profile",
+    "/sys/class/platform-profile/platform-profile-0/profile",
+)
+EC_IO = "/sys/kernel/debug/ec/ec0/io"
+EC_OCC_OFFSET = 0x29
+REAPPLY_SECS = 60
+
+LIMITS = {
+    "performance": (int(os.environ.get("OMEN_PL1_PERF", 90)), int(os.environ.get("OMEN_PL2_PERF", 90))),
+    "balanced":    (int(os.environ.get("OMEN_PL1_OTHER", 45)), int(os.environ.get("OMEN_PL2_OTHER", 90))),
+    "cool":        (int(os.environ.get("OMEN_PL1_OTHER", 45)), int(os.environ.get("OMEN_PL2_OTHER", 90))),
+}
+
+
+def log(msg):
+    print(f"[omen-power] {msg}", flush=True)
+
+
+def read(path):
+    with open(path) as f:
+        return f.read().strip()
+
+
+def profile_path():
+    for p in PROFILE_PATHS:
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def rapl_zones():
+    """All RAPL package zones (intel-rapl:0, and intel-rapl-mmio:0 if the kernel exposes one)."""
+    zones = []
+    for z in sorted(glob.glob("/sys/class/powercap/intel-rapl*:*")):
+        name = os.path.join(z, "name")
+        if os.path.isfile(name) and read(name).startswith("package-") \
+                and os.path.exists(os.path.join(z, "constraint_0_power_limit_uw")):
+            zones.append(z)
+    return zones
+
+
+def rapl_get(zone):
+    return (int(read(f"{zone}/constraint_0_power_limit_uw")) // 1_000_000,
+            int(read(f"{zone}/constraint_1_power_limit_uw")) // 1_000_000)
+
+
+def rapl_set(zone, pl1, pl2):
+    with open(f"{zone}/constraint_0_power_limit_uw", "w") as f:
+        f.write(str(pl1 * 1_000_000))
+    with open(f"{zone}/constraint_1_power_limit_uw", "w") as f:
+        f.write(str(pl2 * 1_000_000))
+
+
+def apply(profile, zones, force=False):
+    pl1, pl2 = LIMITS.get(profile, LIMITS["balanced"])
+    for z in zones:
+        if force or rapl_get(z) != (pl1, pl2):
+            try:
+                rapl_set(z, pl1, pl2)
+                log(f"{profile}: {os.path.basename(z)} PL1={pl1} W PL2={pl2} W")
+            except OSError as e:
+                log(f"failed to write {z}: {e}")
+
+
+def ec_byte(offset):
+    """Read one EC RAM byte via ec_sys (read-only). Returns None if unavailable."""
+    if not os.path.exists(EC_IO):
+        subprocess.run(["modprobe", "ec_sys"], check=False, capture_output=True)
+    try:
+        with open(EC_IO, "rb") as f:
+            f.seek(offset)
+            return f.read(1)[0]
+    except OSError:
+        return None
+
+
+def status():
+    pp = profile_path()
+    print(f"platform_profile : {read(pp) if pp else 'absent (hp_wmi not loaded?)'}")
+    v = ec_byte(EC_OCC_OFFSET)
+    if v is None:
+        print("EC[0x29]         : unreadable (need root + CONFIG_ACPI_EC_DEBUGFS / ec_sys)")
+    else:
+        mode = {0: "balanced", 1: "performance", 2: "cool"}.get(v & 3, f"?{v & 3}")
+        alive = (v >> 7) & 1
+        print(f"EC[0x29]         : 0x{v:02X}  mode={mode}  maxfan={(v >> 6) & 1}  host-alive(OCCN)={alive}")
+        if not alive:
+            print("                   (OCCN reads 0 for a moment after the EC samples it; "
+                  "use 'omen-power watch' - it must return to 1 within one heartbeat interval)")
+    for z in rapl_zones():
+        pl1, pl2 = rapl_get(z)
+        print(f"{os.path.basename(z):<17}: PL1={pl1} W  PL2={pl2} W  "
+              f"(tau1={int(read(f'{z}/constraint_0_time_window_us')) / 1e6:.1f} s)")
+    try:
+        hb = read("/sys/module/hp_wmi/parameters/omen_host_alive_secs")
+        print(f"hp_wmi heartbeat : every {hb} s" if hb != "0" else "hp_wmi heartbeat : DISABLED (omen_host_alive_secs=0)")
+    except OSError:
+        print("hp_wmi heartbeat : module has no omen_host_alive_secs parameter (patch 0003 not installed)")
+    return 0
+
+
+def watch(secs):
+    """Print every change of EC[0x29] for `secs` seconds (default 90)."""
+    last = None
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < secs:
+        v = ec_byte(EC_OCC_OFFSET)
+        if v is None:
+            print("EC unreadable"); return 1
+        if v != last:
+            print(f"{time.monotonic() - t0:6.1f}s  EC[0x29]=0x{v:02X}  mode={v & 3}  maxfan={(v >> 6) & 1}  OCCN={v >> 7}", flush=True)
+            last = v
+        time.sleep(0.25)
+    return 0
+
+
+def wait_for(pred, what, timeout=60):
+    t0 = time.monotonic()
+    while not pred():
+        if time.monotonic() - t0 > timeout:
+            log(f"giving up waiting for {what}")
+            return False
+        time.sleep(1)
+    return True
+
+
+def daemon():
+    if not wait_for(profile_path, "platform_profile"):
+        return 1
+    subprocess.run(["modprobe", "intel_rapl_msr"], check=False, capture_output=True)
+    if not wait_for(rapl_zones, "a RAPL package zone"):
+        return 1
+    pp = profile_path()
+    zones = rapl_zones()
+    log(f"following {pp} -> {', '.join(os.path.basename(z) for z in zones)}")
+
+    stop = False
+
+    def on_sig(*_):
+        nonlocal stop
+        stop = True
+    signal.signal(signal.SIGTERM, on_sig)
+    signal.signal(signal.SIGINT, on_sig)
+
+    fd = os.open(pp, os.O_RDONLY)
+    poller = select.poll()
+    last = None
+    while not stop:
+        cur = os.pread(fd, 64, 0).decode().strip()   # a read re-arms the sysfs poll
+        changed = cur != last
+        if changed:
+            log(f"profile: {cur}")
+            last = cur
+        apply(cur, zones, force=changed)
+        poller.register(fd, select.POLLPRI | select.POLLERR)
+        poller.poll(REAPPLY_SECS * 1000)
+        poller.unregister(fd)
+    log("exiting; limits left as they are")
+    return 0
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "status":
+        return status()
+    if os.geteuid() != 0:
+        log("run as root")
+        return 1
+    if cmd == "apply":
+        pp = profile_path()
+        if not pp:
+            log("no platform_profile")
+            return 1
+        apply(read(pp), rapl_zones(), force=True)
+        return 0
+    if cmd == "daemon":
+        return daemon()
+    if cmd == "watch":
+        return watch(int(sys.argv[2]) if len(sys.argv) > 2 else 90)
+    print(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

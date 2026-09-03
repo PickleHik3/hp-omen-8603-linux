@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# omen-measure - measure sustained package watts per platform_profile.
+#
+# Safety properties (the previous version of this script had none of them):
+#   * every load worker is wrapped in `timeout`, so it self-terminates even if
+#     this script is killed, orphaned, or the terminal closes;
+#   * the process table is checked for stray workers before AND after every
+#     phase, and the run aborts if any are found;
+#   * each profile is measured TWICE so a one-off reading cannot be mistaken
+#     for a result.
+#
+# Reports the boost window and the steady state separately - on this machine
+# they differ by ~25 W and averaging across them is how you get a wrong answer.
+#
+#   sudo ./omen-measure
+
+set -uo pipefail
+
+SECS=${SECS:-60}      # load duration per phase
+TAIL=${TAIL:-20}      # steady-state window = last N seconds
+COOL=${COOL:-60}      # cooldown between phases
+
+STRAY_PIDS=""
+die(){ printf 'error: %s\n' "$*" >&2; exit 1; }
+say(){ printf '%s\n' "$*" >&2; }
+[[ $EUID -eq 0 ]] || die "run as root"
+(( SECS <= 120 )) || die "SECS capped at 120"
+# The firmware holds a ~68-88 W boost for the first 13-20 s. A phase shorter
+# than that measures the boost and nothing else, which is how a 90 W result
+# gets reported for a machine that sustains 45 W. Refuse to produce one.
+(( SECS >= 40 || ${ALLOW_SHORT:-0} )) || die "SECS must be >= 40: the boost window is ~20 s and a \
+shorter phase cannot measure steady state (set ALLOW_SHORT=1 to override)"
+
+
+# Workers carry a unique token so they can never be confused with anything
+# else - including the shell that is doing the searching, which is exactly how
+# a naive pgrep pattern produces false positives.
+TOKEN=OMEN_MEASURE_WORKER_9f3a
+WORKER=": $TOKEN; while :; do :; done"
+
+strays(){
+    # Precise match: only a process whose argv *begins* with the worker
+    # invocation counts. Substring matching would also flag any shell that
+    # merely mentions the token on its command line.
+    local n=0 p pid c
+    for p in /proc/[0-9]*; do
+        pid=${p#/proc/}
+        c=$( { tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null ) || continue
+        if [[ $c == "bash -c $WORKER "* || ( $c == timeout* && $c == *"bash -c $WORKER"* ) ]]; then
+            n=$((n+1)); STRAY_PIDS+=" $pid"
+        fi
+    done
+    echo "$n"
+}
+(( $(strays) == 0 )) || die "stray load workers already running (pids:$STRAY_PIDS) - clear them first"
+
+PP=""
+for c in /sys/class/platform-profile/*/profile; do [[ -w $c ]] && PP=$c && break; done
+[[ -z $PP && -w /sys/firmware/acpi/platform_profile ]] && PP=/sys/firmware/acpi/platform_profile
+[[ -n $PP ]] || die "no writable platform_profile - is the patched hp-wmi loaded?"
+
+ZONE=""
+for z in /sys/class/powercap/intel-rapl:*; do
+    [[ -f $z/name && -f $z/energy_uj && $(<"$z/name") == package-* ]] || continue
+    ZONE=$z; break
+done
+[[ -n $ZONE ]] || die "no intel-rapl package zone"
+MAXE=$(<"$ZONE/max_energy_range_uj")
+
+TEMP=""
+for h in /sys/class/hwmon/hwmon*; do
+    [[ -f $h/name && $(<"$h/name") == coretemp ]] || continue
+    for l in "$h"/temp*_label; do
+        [[ -f $l && $(<"$l") == "Package id 0" ]] || continue
+        TEMP="${l%_label}_input"; break 2
+    done
+done
+[[ -n $TEMP ]] || die "no coretemp Package id 0 sensor"
+
+PPD=0
+systemctl is-active --quiet power-profiles-daemon && { PPD=1; systemctl stop power-profiles-daemon
+    say "stopped power-profiles-daemon for the run"; }
+cleanup(){ pkill -f -- "$TOKEN" 2>/dev/null
+           (( PPD )) && systemctl start power-profiles-daemon; }
+trap cleanup EXIT INT TERM
+
+pl1(){ awk '{printf "%.0f", $1/1000000}' "$ZONE/constraint_0_power_limit_uw"; }
+tempc(){ echo $(( $(<"$TEMP") / 1000 )); }
+
+phase(){ # $1 profile -> "boost steady"
+    local prof=$1
+    (( $(strays) == 0 )) || die "stray workers before phase $prof"
+    echo "$prof" > "$PP"; sleep 3
+    say ""
+    say "--- $prof : readback '$(<"$PP")', PL1 register $(pl1) W, start $(tempc) C ---"
+
+    local i
+    for (( i=0; i<$(nproc); i++ )); do
+        timeout -k 2 "$SECS" bash -c "$WORKER" &
+    done
+
+    local -a s=()
+    local e0 t0 e1 t1 de
+    e0=$(<"$ZONE/energy_uj"); t0=$(date +%s%N)
+    for (( i=0; i<SECS; i++ )); do
+        sleep 1
+        e1=$(<"$ZONE/energy_uj"); t1=$(date +%s%N)
+        de=$(( e1 - e0 )); (( de < 0 )) && de=$(( de + MAXE ))
+        s+=( "$(awk -v d="$de" -v t="$((t1-t0))" 'BEGIN{printf "%.1f",(d/1e6)/(t/1e9)}')" )
+        e0=$e1; t0=$t1
+    done
+    wait 2>/dev/null
+    pkill -f -- "$TOKEN" 2>/dev/null
+    sleep 1
+    (( $(strays) == 0 )) || die "stray workers AFTER phase $prof"
+
+    local boost steady
+    boost=$(printf '%s\n' "${s[@]:0:5}"          | awk '{t+=$1;n++}END{printf "%.1f",t/n}')
+    steady=$(printf '%s\n' "${s[@]: -$TAIL}"     | awk '{t+=$1;n++}END{printf "%.1f",t/n}')
+    say "    first 5 s (boost): ${boost} W        last ${TAIL} s (steady): ${steady} W"
+    say "    end temp: $(tempc) C   readback: $(<"$PP")"
+    echo "$boost $steady"
+}
+
+say "profile file : $PP"
+say "RAPL zone    : $ZONE"
+say "AC online    : $(cat /sys/class/power_supply/ACAD/online 2>/dev/null)"
+say ""
+say "=== ${SECS}s load per phase, ${COOL}s cooldown, each profile measured twice ==="
+
+read -r P1B P1S < <(phase performance); sleep "$COOL"
+read -r B1B B1S < <(phase balanced);    sleep "$COOL"
+read -r P2B P2S < <(phase performance); sleep "$COOL"
+read -r B2B B2S < <(phase balanced)
+
+echo
+echo "==================== RESULT ===================="
+printf '  %-16s %8s %8s\n' "" "boost" "steady"
+printf '  %-16s %7s W %7s W\n' "performance #1" "$P1B" "$P1S"
+printf '  %-16s %7s W %7s W\n' "performance #2" "$P2B" "$P2S"
+printf '  %-16s %7s W %7s W\n' "balanced #1"    "$B1B" "$B1S"
+printf '  %-16s %7s W %7s W\n' "balanced #2"    "$B2B" "$B2S"
+echo
+awk -v p1="$P1S" -v p2="$P2S" -v b1="$B1S" -v b2="$B2S" 'BEGIN{
+  pr=(p1+p2)/2; ba=(b1+b2)/2; d=pr-ba;
+  printf "  performance runs agree to %.1f W, balanced to %.1f W\n", (p1>p2?p1-p2:p2-p1), (b1>b2?b1-b2:b2-b1);
+  printf "  steady-state difference: %+.1f W\n\n", d;
+  if (d < 3) print "  -> the profile does NOT change sustained power on this machine.";
+  else       print "  -> the profile raises sustained power.";
+}'
+echo "  stray workers remaining: $(strays)  (must be 0)"

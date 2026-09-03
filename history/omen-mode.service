@@ -1,0 +1,18 @@
+# SUPERSEDED 2026-09-03 by the kernel heartbeat (omen8603-linux/patches/0003) and omen-power.service. Do not enable.
+[Unit]
+Description=HP OMEN 17-cb0 (board 8603): hold Performance thermal mode and refresh the EC host-alive bit
+# Start EARLY: the EC latches ~6 min after boot if no heartbeat arrives, and only a reboot clears it.
+DefaultDependencies=no
+After=sysinit.target
+Before=basic.target
+
+[Service]
+Type=simple
+# METHOD=auto prefers acpi_call (firmware WMI path), falls back to ec_sys direct write.
+Environment=METHOD=auto REFRESH_SECS=60 MODE=performance PL_WATTS=90
+ExecStart=/usr/local/bin/omen-mode daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

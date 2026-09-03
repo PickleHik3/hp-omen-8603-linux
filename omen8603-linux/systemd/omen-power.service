@@ -1,0 +1,17 @@
+[Unit]
+Description=OMEN 8603: mirror the platform_profile onto RAPL PL1/PL2 (90 W in performance)
+Documentation=https://github.com/PickleHik3/hp-omen-8603-linux
+# The EC host-alive heartbeat lives in the patched hp-wmi module, not here; this
+# unit only keeps the MSR copy of the limits where OMEN Gaming Hub would put it.
+After=systemd-modules-load.service power-profiles-daemon.service
+Wants=power-profiles-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/omen-power daemon
+Restart=on-failure
+RestartSec=5
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
