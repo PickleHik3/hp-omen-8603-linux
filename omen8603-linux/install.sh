@@ -17,7 +17,10 @@ fi
 
 command -v dkms >/dev/null || { echo "dkms is not installed (pacman -S dkms)" >&2; exit 1; }
 [[ -d /usr/lib/modules/$(uname -r)/build ]] || {
-    echo "kernel headers for $(uname -r) are missing (pacman -S linux-headers)" >&2; exit 1; }
+    # headers package follows the kernel package: linux -> linux-headers,
+    # linux-cachyos -> linux-cachyos-headers, linux-zen -> linux-zen-headers
+    kpkg=$(pacman -Qoq "/usr/lib/modules/$(uname -r)/vmlinuz" 2>/dev/null || echo linux)
+    echo "kernel headers for $(uname -r) are missing (pacman -S ${kpkg}-headers)" >&2; exit 1; }
 
 # Drop every registered version of this package (older ones included) so only
 # one copy of hp-wmi.ko ever lands in /updates/dkms.

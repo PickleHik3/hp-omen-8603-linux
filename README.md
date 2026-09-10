@@ -52,9 +52,14 @@ explain them. Everything was measured on one machine:
 ```bash
 git clone https://github.com/PickleHik3/hp-omen-8603-linux
 cd hp-omen-8603-linux/omen8603-linux
-sudo ./install.sh          # needs dkms and linux-headers
+sudo ./install.sh          # needs dkms and the headers for the running kernel
 sudo ./tools/omen-verify
 ```
+
+Headers must match the kernel you booted: `linux-headers` for stock Arch,
+`linux-cachyos-headers` on CachyOS (`<kernel-package>-headers` in general; LTO
+kernels also need `clang llvm lld` for DKMS). Mode switching goes through
+`power-profiles-daemon`, so have it installed and enabled.
 
 Then reboot once, so the EC comes up unlatched with the heartbeat already running,
 and switch modes as usual (`powerprofilesctl set performance`, or your desktop's
